@@ -59,6 +59,14 @@ RUN GH_VERSION=$(curl -fsSL https://api.github.com/repos/cli/cli/releases/latest
     mv /tmp/gh_${GH_VERSION}_linux_amd64/bin/gh /usr/local/bin/gh && \
     chmod +x /usr/local/bin/gh && rm -rf /tmp/gh.tar.gz /tmp/gh_*
 
+# Download tkn (Tekton CLI) — streams PipelineRun/TaskRun logs (`tkn pr logs -f`)
+# instead of hand-rolled kubectl watch loops. Pinned to a release version.
+RUN TKN_VERSION=0.45.0 && \
+    curl -fsSL "https://github.com/tektoncd/cli/releases/download/v${TKN_VERSION}/tkn_${TKN_VERSION}_Linux_x86_64.tar.gz" \
+    -o /tmp/tkn.tar.gz && tar -xzf /tmp/tkn.tar.gz -C /tmp tkn && \
+    mv /tmp/tkn /usr/local/bin/tkn && \
+    chmod +x /usr/local/bin/tkn && rm -f /tmp/tkn.tar.gz
+
 # Download Docker CLI (static binary) — talks to the host's Docker daemon via DOCKER_HOST
 RUN DOCKER_VERSION=28.3.3 && \
     curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_VERSION}.tgz" \
@@ -157,6 +165,7 @@ COPY --from=builder /opt/aws-s3-mcp /opt/aws-s3-mcp
 COPY --from=builder /opt/authentik-mcp /opt/authentik-mcp
 COPY --from=builder /opt/gcloud-mcp /opt/gcloud-mcp
 COPY --from=builder /usr/local/bin/gh /usr/local/bin/gh
+COPY --from=builder /usr/local/bin/tkn /usr/local/bin/tkn
 COPY --from=builder /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=builder /usr/libexec/docker/cli-plugins/docker-compose /usr/libexec/docker/cli-plugins/docker-compose
 COPY --from=builder /usr/local/bin/telepresence /usr/local/bin/telepresence
