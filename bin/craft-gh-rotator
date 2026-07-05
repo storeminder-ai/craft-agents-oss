@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# craft-gh-rotator — keep a fresh storeminder-sidekick GitHub App installation token on
+# a shared creds volume so the agent authors git/gh (and, later, the github MCP)
+# as the App instead of a human PAT.
+#
+# Why this exists: the runtime receives its GitHub token via `envFrom` — a k8s
+# env var that is immutable for the life of the container (VSO/Secret changes do
+# NOT propagate to a running process; verified craft-agents#32). App installation
+# tokens expire hourly, so a static env token can't carry an App identity. This
+# sidecar mints a new token every ~45 min and publishes it to files that gh reads
+# per-invocation, giving restart-free rotation.
+#
+# Publishes (under $CREDS_DIR, default /creds — a shared emptyDir):
+#   gh_token           the raw installation token
+#   gh_token.expiry    epoch seconds (for git's credential `password_expiry_utc`)
+#   gh/hosts.yml       a gh CLI config; the main container sets GH_CONFIG_DIR=/creds/gh
+#                      and empties GH_TOKEN so gh (and git via `gh auth git-credential`)
+#                      use this rotating token.
+set -euo pipefail
+
+APP_ID="${GH_APP_ID:?GH_APP_ID required}"
+INSTALL_ID="${GH_APP_INSTALLATION_ID:?GH_APP_INSTALLATION_ID required}"
+KEY="${GH_APP_KEY_FILE:-/vault/app/private-key}"
+CREDS="${CREDS_DIR:-/creds}"
+GH_DIR="$CREDS/gh"
+INTERVAL="${ROTATE_INTERVAL:-2700}"      # 45m; installation tokens live 60m
+RETRY="${ROTATE_RETRY:-60}"
+
+b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+
+mint() {
+  local now iat exp h p sig jwt resp token expires
+  [ -r "$KEY" ] || { echo "[rotator] key not readable: $KEY" >&2; return 1; }
+  now=$(date +%s); iat=$((now - 60)); exp=$((now + 540))
+  h=$(printf '{"alg":"RS256","typ":"JWT"}' | b64url)
+  p=$(printf '{"iat":%s,"exp":%s,"iss":"%s"}' "$iat" "$exp" "$APP_ID" | b64url)
+  sig=$(printf '%s' "$h.$p" | openssl dgst -sha256 -sign "$KEY" -binary | b64url)
+  jwt="$h.$p.$sig"
+  resp=$(curl -sf -X POST \
+    -H "Authorization: Bearer $jwt" \
+    -H "Accept: application/vnd.github+json" \
+    "https://api.github.com/app/installations/${INSTALL_ID}/access_tokens") || {
+      echo "[rotator] token endpoint call failed" >&2; return 1; }
+  token=$(printf '%s' "$resp" | jq -r '.token // empty')
+  expires=$(printf '%s' "$resp" | jq -r '.expires_at // empty')
+  [ -n "$token" ] || { echo "[rotator] no token in response" >&2; return 1; }
+
+  mkdir -p "$GH_DIR"
+  ( umask 077
+    printf '%s' "$token" > "$CREDS/gh_token"
+    if [ -n "$expires" ]; then date -u -d "$expires" +%s > "$CREDS/gh_token.expiry" 2>/dev/null || true; fi
+    cat > "$GH_DIR/hosts.yml" <<EOF
+github.com:
+    oauth_token: $token
+    user: x-access-token
+    git_protocol: https
+EOF
+  )
+  echo "[rotator] rotated ok (token len ${#token}, expires ${expires:-?})"
+}
+
+# --oneshot: mint a single token and exit (used by the init container so /creds is
+# populated before the main container starts). Default: rotate forever.
+if [ "${1:-}" = "--oneshot" ]; then
+  mint
+  exit $?
+fi
+
+while true; do
+  if mint; then sleep "$INTERVAL"; else echo "[rotator] retry in ${RETRY}s" >&2; sleep "$RETRY"; fi
+done
