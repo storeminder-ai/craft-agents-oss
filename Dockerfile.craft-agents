@@ -78,6 +78,12 @@ RUN TELEPRESENCE_VERSION=v2.22.0 && \
     curl -fsSL "https://app.getambassador.io/download/tel2oss/releases/download/${TELEPRESENCE_VERSION}/telepresence-linux-amd64" \
     -o /usr/local/bin/telepresence && chmod +x /usr/local/bin/telepresence
 
+# Download yq (mikefarah/yq) — the Go YAML/JSON/XML processor. Ships as a single
+# static binary. Pinned to v4.53.3.
+RUN YQ_VERSION=v4.53.3 && \
+    curl -fsSL "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64" \
+    -o /usr/local/bin/yq && chmod +x /usr/local/bin/yq
+
 # Download rd (Rundeck CLI) jar
 RUN RD_VERSION=$(curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 https://api.github.com/repos/rundeck/rundeck-cli/releases/latest | grep '"tag_name"' | head -1 | sed 's/.*"v\([^"]*\)".*/\1/') && \
     curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 --connect-timeout 20 --max-time 300 \
@@ -160,6 +166,7 @@ COPY --from=builder /usr/local/bin/gh /usr/local/bin/gh
 COPY --from=builder /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=builder /usr/libexec/docker/cli-plugins/docker-compose /usr/libexec/docker/cli-plugins/docker-compose
 COPY --from=builder /usr/local/bin/telepresence /usr/local/bin/telepresence
+COPY --from=builder /usr/local/bin/yq /usr/local/bin/yq
 COPY --from=builder /usr/local/lib/rd.jar /usr/local/lib/rd.jar
 
 RUN chmod +x bin/craft-server vendor/bun/bun resources/bin/uv && \
@@ -179,7 +186,7 @@ RUN apt-get update && apt-get install -y \
 RUN rm -f /usr/lib/python3*/EXTERNALLY-MANAGED && \
     python3 -m pip install \
       pyyaml requests httpx rich typer click \
-      python-dateutil tabulate
+      python-dateutil tabulate yamllint ansible-lint
 
 ARG CRAFT_UID=1007
 ARG CRAFT_GID=1007
