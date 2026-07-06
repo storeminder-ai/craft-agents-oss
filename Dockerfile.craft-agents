@@ -109,6 +109,30 @@ RUN mkdir -p /opt/authentik-mcp && cd /opt/authentik-mcp && \
 RUN mkdir -p /opt/gcloud-mcp && cd /opt/gcloud-mcp && \
     bun init -y && bun add --backend=copyfile @google-cloud/gcloud-mcp
 
+# --- Optional edge tooling tier (craft-agents#52) ---
+# Small, high-value single binaries for edge bash / Mender work. bats is added
+# to the runtime apt list; the qemu+OVMF item from #52 is intentionally deferred
+# (hundreds of MB) — see the PR for the size rationale.
+
+# shfmt — single static Go binary for consistent shell formatting across the
+# edge repo's scripts. github.com/mvdan/sh releases. Pinned.
+RUN SHFMT_VERSION=3.13.1 && \
+    curl -fsSL "https://github.com/mvdan/sh/releases/download/v${SHFMT_VERSION}/shfmt_v${SHFMT_VERSION}_linux_amd64" \
+    -o /usr/local/bin/shfmt && chmod +x /usr/local/bin/shfmt
+
+# mender-artifact — inspect/verify built Mender artifacts locally instead of
+# only in CI. Upstream stopped publishing standalone binaries after 4.1.0 and
+# ships no GitHub release assets, so extract the single binary from the official
+# workstation-tools .deb (linux amd64). Its shared libs (libssl3, zlib1g,
+# libzstd1) are already provided by the runtime `curl` dependency. Pinned.
+RUN MENDER_ARTIFACT_VERSION=4.4.0 && \
+    curl -fsSL "https://downloads.mender.io/repos/workstation-tools/pool/main/m/mender-artifact/mender-artifact_${MENDER_ARTIFACT_VERSION}-1+ubuntu+noble_amd64.deb" \
+    -o /tmp/mender-artifact.deb && \
+    dpkg-deb -x /tmp/mender-artifact.deb /tmp/mender-artifact && \
+    mv /tmp/mender-artifact/usr/bin/mender-artifact /usr/local/bin/mender-artifact && \
+    chmod +x /usr/local/bin/mender-artifact && \
+    rm -rf /tmp/mender-artifact.deb /tmp/mender-artifact
+
 WORKDIR /src
 COPY . .
 
@@ -161,6 +185,9 @@ COPY --from=builder /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=builder /usr/libexec/docker/cli-plugins/docker-compose /usr/libexec/docker/cli-plugins/docker-compose
 COPY --from=builder /usr/local/bin/telepresence /usr/local/bin/telepresence
 COPY --from=builder /usr/local/lib/rd.jar /usr/local/lib/rd.jar
+# Optional edge tooling tier (craft-agents#52): shell formatter + Mender artifact inspector.
+COPY --from=builder /usr/local/bin/shfmt /usr/local/bin/shfmt
+COPY --from=builder /usr/local/bin/mender-artifact /usr/local/bin/mender-artifact
 
 RUN chmod +x bin/craft-server vendor/bun/bun resources/bin/uv && \
     for f in resources/bin/*; do [ -f "$f" ] && chmod +x "$f"; done
@@ -170,6 +197,7 @@ RUN apt-get update && apt-get install -y \
       python3 python3-pip python3-venv python3-dev \
       python3-yaml python3-requests \
       jq ripgrep tree file less unzip vim-tiny ca-certificates \
+      bats \
     && rm -rf /var/lib/apt/lists/*
 
 # Make pip behave like pip on a dev box. The container is a single-tenant
