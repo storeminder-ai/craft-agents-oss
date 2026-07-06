@@ -136,34 +136,17 @@ FROM oven/bun:1.3-slim
 
 WORKDIR /app
 
-COPY --from=builder /src/dist/server/ .
-# Ship the built session viewer so the share server finds it at its default
-# location: CRAFT_BUNDLED_ASSETS_ROOT/apps/viewer/dist == /app/apps/viewer/dist.
-COPY --from=builder /src/apps/viewer/dist /app/apps/viewer/dist
-# Ship the built web UI so the server enables it at CRAFT_WEBUI_DIR
-# (/app/apps/webui/dist) and serves it on the RPC port for browser clients.
-COPY --from=builder /src/apps/webui/dist /app/apps/webui/dist
-COPY --from=builder /usr/local/bin/kubectl /usr/local/bin/kubectl
-COPY --from=builder /usr/local/bin/helm /usr/local/bin/helm
-COPY --from=builder /usr/local/bin/tofu /usr/local/bin/tofu
-COPY --from=builder /usr/local/bin/terragrunt /usr/local/bin/terragrunt
-COPY --from=builder /usr/local/bin/kubernetes-mcp-server /usr/local/bin/kubernetes-mcp-server
-COPY --from=builder /usr/local/bin/tekton-mcp-server /usr/local/bin/tekton-mcp-server
-COPY --from=builder /usr/local/bin/neo4j-mcp /usr/local/bin/neo4j-mcp
-COPY --from=builder /usr/local/bin/portainer-mcp /usr/local/bin/portainer-mcp
-COPY --from=builder /opt/argocd-mcp /opt/argocd-mcp
-COPY --from=builder /opt/sonatype-mcp /opt/sonatype-mcp
-COPY --from=builder /opt/aws-s3-mcp /opt/aws-s3-mcp
-COPY --from=builder /opt/authentik-mcp /opt/authentik-mcp
-COPY --from=builder /opt/gcloud-mcp /opt/gcloud-mcp
-COPY --from=builder /usr/local/bin/gh /usr/local/bin/gh
-COPY --from=builder /usr/local/bin/docker /usr/local/bin/docker
-COPY --from=builder /usr/libexec/docker/cli-plugins/docker-compose /usr/libexec/docker/cli-plugins/docker-compose
-COPY --from=builder /usr/local/bin/telepresence /usr/local/bin/telepresence
-COPY --from=builder /usr/local/lib/rd.jar /usr/local/lib/rd.jar
-
-RUN chmod +x bin/craft-server vendor/bun/bun resources/bin/uv && \
-    for f in resources/bin/*; do [ -f "$f" ] && chmod +x "$f"; done
+# ---------------------------------------------------------------------------
+# Environment / toolchain layers.
+#
+# These RUNs are independent of the built server dist, so they are placed
+# BEFORE the `COPY --from=builder` lines below. A source-only commit changes
+# only the dist (and the two context COPYs at the very end), so keeping the
+# heavyweight apt/pip/sbt/AWS CLI/gcloud SDK installs ahead of the dist COPY
+# lets them cache-hit on every source-only rebuild instead of re-downloading
+# ~1GB+ of packages. Do not move dist-dependent steps up here — see the block
+# after the COPYs. (storeminder-ai/craft-agents#62)
+# ---------------------------------------------------------------------------
 
 RUN apt-get update && apt-get install -y \
       git curl gnupg default-jdk-headless gosu rsync sudo iptables \
@@ -208,37 +191,6 @@ RUN curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 \
     echo "deb [signed-by=/usr/share/keyrings/sbt-archive-keyring.gpg] https://repo.scala-sbt.org/scalasbt/debian all main" \
     > /etc/apt/sources.list.d/sbt.list && \
     apt-get update && apt-get install -y sbt && rm -rf /var/lib/apt/lists/*
-
-RUN bun install --backend=copyfile --frozen-lockfile 2>/dev/null || bun install --backend=copyfile
-
-ENV CRAFT_IS_PACKAGED=true
-ENV CRAFT_BUNDLED_ASSETS_ROOT=/app
-ENV CRAFT_APP_ROOT=/app
-ENV CRAFT_RESOURCES_PATH=/app/resources
-ENV CRAFT_UV=/app/resources/bin/uv
-ENV CRAFT_SCRIPTS=/app/resources/scripts
-ENV CRAFT_RPC_HOST=0.0.0.0
-ENV CRAFT_RPC_PORT=9100
-ENV PATH="/app/resources/bin:/app/vendor/bun:${PATH}"
-
-# Host Docker access — assumes the host exposes dockerd on tcp://172.17.0.1:2376
-# (the default Docker bridge gateway). Override at run time via -e DOCKER_HOST=...
-# if the host listens elsewhere. Plain HTTP, no TLS — only safe behind a trusted
-# bridge network.
-ENV DOCKER_HOST=tcp://172.17.0.1:2376
-
-# Install rundeck-mcp server (Python MCP for Rundeck automation)
-# Uses uv tool install with explicit dirs so binaries are accessible to non-root user
-ENV UV_TOOL_DIR=/opt/uv-tools
-ENV UV_TOOL_BIN_DIR=/usr/local/bin
-ENV UV_PYTHON_INSTALL_DIR=/opt/uv-python
-RUN /app/resources/bin/uv tool install git+https://github.com/marcelobrake/rundeck-mcp.git && \
-    apt-get update && apt-get install -y build-essential && \
-    /app/resources/bin/uv tool install postgres-mcp --python 3.12 && \
-    /app/resources/bin/uv tool install awslabs.aws-api-mcp-server --python 3.12 && \
-    apt-get remove -y build-essential && apt-get autoremove -y && \
-    rm -rf /var/lib/apt/lists/* && \
-    chmod -R a+rX /opt/uv-tools /opt/uv-python
 
 # Install AWS CLI v2 (required for SSO device-auth login and profile management)
 RUN ARCH=$(dpkg --print-architecture) && \
@@ -322,6 +274,84 @@ RUN printf '%s\n' \
     'esac' \
     > /usr/local/bin/craft-bg && \
     chmod +x /usr/local/bin/craft-bg
+
+# ---------------------------------------------------------------------------
+# COPY from the builder stage.
+#
+# The dist COPYs below (server / viewer / webui) change on every source commit
+# and therefore invalidate everything AFTER this point. Keep only genuinely
+# dist-dependent steps below them. The remaining COPYs are prebuilt tool
+# binaries pulled from the builder's early (source-independent) layers.
+# ---------------------------------------------------------------------------
+
+COPY --from=builder /src/dist/server/ .
+# Ship the built session viewer so the share server finds it at its default
+# location: CRAFT_BUNDLED_ASSETS_ROOT/apps/viewer/dist == /app/apps/viewer/dist.
+COPY --from=builder /src/apps/viewer/dist /app/apps/viewer/dist
+# Ship the built web UI so the server enables it at CRAFT_WEBUI_DIR
+# (/app/apps/webui/dist) and serves it on the RPC port for browser clients.
+COPY --from=builder /src/apps/webui/dist /app/apps/webui/dist
+COPY --from=builder /usr/local/bin/kubectl /usr/local/bin/kubectl
+COPY --from=builder /usr/local/bin/helm /usr/local/bin/helm
+COPY --from=builder /usr/local/bin/tofu /usr/local/bin/tofu
+COPY --from=builder /usr/local/bin/terragrunt /usr/local/bin/terragrunt
+COPY --from=builder /usr/local/bin/kubernetes-mcp-server /usr/local/bin/kubernetes-mcp-server
+COPY --from=builder /usr/local/bin/tekton-mcp-server /usr/local/bin/tekton-mcp-server
+COPY --from=builder /usr/local/bin/neo4j-mcp /usr/local/bin/neo4j-mcp
+COPY --from=builder /usr/local/bin/portainer-mcp /usr/local/bin/portainer-mcp
+COPY --from=builder /opt/argocd-mcp /opt/argocd-mcp
+COPY --from=builder /opt/sonatype-mcp /opt/sonatype-mcp
+COPY --from=builder /opt/aws-s3-mcp /opt/aws-s3-mcp
+COPY --from=builder /opt/authentik-mcp /opt/authentik-mcp
+COPY --from=builder /opt/gcloud-mcp /opt/gcloud-mcp
+COPY --from=builder /usr/local/bin/gh /usr/local/bin/gh
+COPY --from=builder /usr/local/bin/docker /usr/local/bin/docker
+COPY --from=builder /usr/libexec/docker/cli-plugins/docker-compose /usr/libexec/docker/cli-plugins/docker-compose
+COPY --from=builder /usr/local/bin/telepresence /usr/local/bin/telepresence
+COPY --from=builder /usr/local/lib/rd.jar /usr/local/lib/rd.jar
+
+# ---------------------------------------------------------------------------
+# Dist-dependent steps — MUST stay after the dist COPY above.
+#   * chmod operates on the copied bin/craft-server, vendor/bun/bun and
+#     resources/bin/* (including resources/bin/uv).
+#   * the uv tool installs invoke /app/resources/bin/uv, shipped in the dist.
+#   * the trailing `bun install` resolves the copied dist's package.json.
+# ---------------------------------------------------------------------------
+
+RUN chmod +x bin/craft-server vendor/bun/bun resources/bin/uv && \
+    for f in resources/bin/*; do [ -f "$f" ] && chmod +x "$f"; done
+
+RUN bun install --backend=copyfile --frozen-lockfile 2>/dev/null || bun install --backend=copyfile
+
+ENV CRAFT_IS_PACKAGED=true
+ENV CRAFT_BUNDLED_ASSETS_ROOT=/app
+ENV CRAFT_APP_ROOT=/app
+ENV CRAFT_RESOURCES_PATH=/app/resources
+ENV CRAFT_UV=/app/resources/bin/uv
+ENV CRAFT_SCRIPTS=/app/resources/scripts
+ENV CRAFT_RPC_HOST=0.0.0.0
+ENV CRAFT_RPC_PORT=9100
+ENV PATH="/app/resources/bin:/app/vendor/bun:${PATH}"
+
+# Host Docker access — assumes the host exposes dockerd on tcp://172.17.0.1:2376
+# (the default Docker bridge gateway). Override at run time via -e DOCKER_HOST=...
+# if the host listens elsewhere. Plain HTTP, no TLS — only safe behind a trusted
+# bridge network.
+ENV DOCKER_HOST=tcp://172.17.0.1:2376
+
+# Install rundeck-mcp server (Python MCP for Rundeck automation)
+# Uses uv tool install with explicit dirs so binaries are accessible to non-root user.
+# Depends on /app/resources/bin/uv (from the dist COPY), so it stays after the COPYs.
+ENV UV_TOOL_DIR=/opt/uv-tools
+ENV UV_TOOL_BIN_DIR=/usr/local/bin
+ENV UV_PYTHON_INSTALL_DIR=/opt/uv-python
+RUN /app/resources/bin/uv tool install git+https://github.com/marcelobrake/rundeck-mcp.git && \
+    apt-get update && apt-get install -y build-essential && \
+    /app/resources/bin/uv tool install postgres-mcp --python 3.12 && \
+    /app/resources/bin/uv tool install awslabs.aws-api-mcp-server --python 3.12 && \
+    apt-get remove -y build-essential && apt-get autoremove -y && \
+    rm -rf /var/lib/apt/lists/* && \
+    chmod -R a+rX /opt/uv-tools /opt/uv-python
 
 # GitHub App installation-token rotator (storeminder-ai/craft-agents#33). Runs as
 # an init container (--oneshot) + a long-lived sidecar in 20-deployment.yaml so the
